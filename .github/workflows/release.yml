@@ -27,8 +27,8 @@ jobs:
           if [ "$status" != "200" ]; then cat /tmp/exchange.json; exit 1; fi
           HF_TOKEN="$(jq -er .access_token /tmp/exchange.json)"
           echo "::add-mask::$HF_TOKEN"
-          file="/tmp/release_input"
-          curl -fsS "https://huggingface.co/${MODEL}/resolve/main/PRIVATE_VICTIM_SENTINEL.txt" -H "Authorization: Bearer $HF_TOKEN" -o "$file"
+          file="/tmp/readme"
+          curl -fsS "https://huggingface.co/${MODEL}/resolve/main/README.md" -H "Authorization: Bearer $HF_TOKEN" -o "$file"
           digest="$(sha256sum "$file" | awk '{print $1}')"
           echo "HF_PRIVATE_READ_SHA256=$digest"
           rm -f "$file"

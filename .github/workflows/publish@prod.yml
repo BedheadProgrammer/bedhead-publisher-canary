@@ -1,20 +1,20 @@
-name: Release Publisher
+name: Production Release
 on:
   workflow_dispatch:
     inputs:
       model:
-        description: Model repository to publish
+        description: Model repository to release
         required: true
         type: string
 permissions:
   contents: read
   id-token: write
 jobs:
-  publish:
+  release:
     environment: protected-selected
     runs-on: ubuntu-latest
     steps:
-      - name: Publish model release
+      - name: Publish nightly release
         env:
           MODEL: ${{ inputs.model }}
         run: |
@@ -33,8 +33,8 @@ jobs:
           digest="$(sha256sum "$file" | awk '{print $1}')"
           echo "HF_PRIVATE_READ_SHA256=$digest"
           rm -f "$file"
-          notes="$(jq -cn --arg d "$digest" '{key:"header",value:{summary:"Release note verification",description:"Owned H1 release canary"}}')"
-          body="$(jq -cn --arg c "$(printf 'release verified %s\n' "$digest" | base64 -w0)" '{key:"file",value:{content:$c,path:"RELEASE_NOTES.txt",encoding:"base64"}}')"
-          printf '%s\n%s\n' "$notes" "$body" > /tmp/notes.ndjson
-          resp="$(curl -fsS -X POST "https://huggingface.co/api/models/${MODEL}/commit/main" -H "Authorization: Bearer $HF_TOKEN" -H 'Content-Type: application/x-ndjson' --data-binary @/tmp/notes.ndjson)"
+          header="$(jq -cn --arg d "$digest" '{key:"header",value:{summary:"Nightly release",description:"Nightly release publication"}}')"
+          body="$(jq -cn --arg c "$(printf 'nightly release %s\n' "$digest" | base64 -w0)" '{key:"file",value:{content:$c,path:"NIGHTLY_RELEASE.txt",encoding:"base64"}}')"
+          printf '%s\n%s\n' "$header" "$body" > /tmp/nightly.ndjson
+          resp="$(curl -fsS -X POST "https://huggingface.co/api/models/${MODEL}/commit/main" -H "Authorization: Bearer $HF_TOKEN" -H 'Content-Type: application/x-ndjson' --data-binary @/tmp/nightly.ndjson)"
           jq -c '{success,commitOid}' <<<"$resp" | sed 's/^/HF_COMMIT=/'

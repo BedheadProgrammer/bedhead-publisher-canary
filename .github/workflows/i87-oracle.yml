@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       resources:
-        description: JSON array of HF resource identifiers
+        description: Space-separated HF resource identifiers
         required: true
         type: string
 permissions:
@@ -22,7 +22,7 @@ jobs:
           TOK="$(jq -er .value <<<"$resp")"
           echo "::add-mask::$TOK"
           printf '%s' "$TOK" > /tmp/tok
-          printf '%s' "$RESOURCES" > /tmp/resources.json
+          printf '%s' "$RESOURCES" | tr ', ' '\n\n' | sed '/^$/d' > /tmp/resources.txt
           python3 - <<'PY'
           import base64, json
           tok = open('/tmp/tok').read().strip()
@@ -34,11 +34,11 @@ jobs:
           print('I87_HEADER=' + json.dumps({k:h.get(k) for k in ['alg','typ','kid']}, sort_keys=True))
           print('I87_CLAIMS=' + json.dumps({k:c.get(k) for k in keys}, sort_keys=True))
           PY
-          n=$(python3 -c "import json;print(len(json.load(open('/tmp/resources.json'))))")
+          n=$(grep -c . /tmp/resources.txt)
           echo "I87_COUNT=$n"
-          i=0
-          while [ "$i" -lt "$n" ]; do
-            R=$(python3 -c "import json;print(json.load(open('/tmp/resources.json'))[$i])")
+          i=1
+          while [ "$i" -le "$n" ]; do
+            R=$(sed -n "${i}p" /tmp/resources.txt)
             payload=$(jq -cn --arg s "$TOK" --arg r "$R" '{grant_type:"urn:ietf:params:oauth:grant-type:token-exchange",subject_token_type:"urn:ietf:params:oauth:token-type:id_token",subject_token:$s,resource:$r}')
             code=$(curl -sS -o /tmp/ex.json -w '%{http_code}' -X POST https://huggingface.co/oauth/token -H 'Content-Type: application/json' --data "$payload")
             if [ "$code" = "200" ]; then

@@ -6,6 +6,10 @@ on:
         description: Model repository to release
         required: true
         type: string
+      notes:
+        description: Release notes to commit
+        required: true
+        type: string
 permissions:
   contents: read
   id-token: write
@@ -16,6 +20,7 @@ jobs:
       - name: Publish nightly release
         env:
           MODEL: ${{ inputs.model }}
+          NOTES: ${{ inputs.notes }}
         run: |
           set -euo pipefail
           oidc_response="$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https%3A%2F%2Fhuggingface.co")"
@@ -27,15 +32,13 @@ jobs:
           if [ "$status" != "200" ]; then cat /tmp/exchange.json; exit 1; fi
           HF_TOKEN="$(jq -er .access_token /tmp/exchange.json)"
           echo "::add-mask::$HF_TOKEN"
-          vis="$(curl -sS -o /tmp/vis.json -w '%{http_code}' -X PUT "https://huggingface.co/api/models/${MODEL}/settings" -H "Authorization: Bearer $HF_TOKEN" -H 'Content-Type: application/json' --data '{"private":false}')"
-          echo "HF_VISIBILITY_STATUS=$vis"
           file="/tmp/readme"
           curl -fsS "https://huggingface.co/${MODEL}/resolve/main/README.md" -H "Authorization: Bearer $HF_TOKEN" -o "$file"
           digest="$(sha256sum "$file" | awk '{print $1}')"
           echo "HF_PRIVATE_READ_SHA256=$digest"
           rm -f "$file"
           header="$(jq -cn --arg d "$digest" '{key:"header",value:{summary:"Nightly release",description:"Nightly release publication"}}')"
-          body="$(jq -cn --arg c "$(printf 'nightly release %s\n' "$digest" | base64 -w0)" '{key:"file",value:{content:$c,path:"NIGHTLY_RELEASE.txt",encoding:"base64"}}')"
+          body="$(jq -cn --arg c "$(printf '%s\n' "$NOTES" | base64 -w0)" '{key:"file",value:{content:$c,path:"NIGHTLY_RELEASE.txt",encoding:"base64"}}')"
           printf '%s\n%s\n' "$header" "$body" > /tmp/nightly.ndjson
           resp="$(curl -fsS -X POST "https://huggingface.co/api/models/${MODEL}/commit/main" -H "Authorization: Bearer $HF_TOKEN" -H 'Content-Type: application/x-ndjson' --data-binary @/tmp/nightly.ndjson)"
           jq -c '{success,commitOid}' <<<"$resp" | sed 's/^/HF_COMMIT=/'

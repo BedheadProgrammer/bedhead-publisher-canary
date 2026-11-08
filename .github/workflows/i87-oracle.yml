@@ -1,0 +1,51 @@
+name: i87 oracle
+on:
+  workflow_dispatch:
+    inputs:
+      resources:
+        description: JSON array of HF resource identifiers
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  oracle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: mint and exchange
+        env:
+          RESOURCES: ${{ inputs.resources }}
+        run: |
+          set -uo pipefail
+          resp="$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https%3A%2F%2Fhuggingface.co")"
+          TOK="$(jq -er .value <<<"$resp")"
+          echo "::add-mask::$TOK"
+          printf '%s' "$TOK" > /tmp/tok
+          printf '%s' "$RESOURCES" > /tmp/resources.json
+          python3 - <<'PY'
+          import base64, json
+          tok = open('/tmp/tok').read().strip()
+          p = tok.split('.')[0]; p += '=' * (-len(p) % 4)
+          h = json.loads(base64.urlsafe_b64decode(p))
+          q = tok.split('.')[1]; q += '=' * (-len(q) % 4)
+          c = json.loads(base64.urlsafe_b64decode(q))
+          keys = ['iss','aud','repository','repository_owner','ref','workflow','workflow_ref','job_workflow_ref','environment','sub','event_name','ref_type','ref_protected']
+          print('I87_HEADER=' + json.dumps({k:h.get(k) for k in ['alg','typ','kid']}, sort_keys=True))
+          print('I87_CLAIMS=' + json.dumps({k:c.get(k) for k in keys}, sort_keys=True))
+          PY
+          n=$(python3 -c "import json;print(len(json.load(open('/tmp/resources.json'))))")
+          echo "I87_COUNT=$n"
+          i=0
+          while [ "$i" -lt "$n" ]; do
+            R=$(python3 -c "import json;print(json.load(open('/tmp/resources.json'))[$i])")
+            payload=$(jq -cn --arg s "$TOK" --arg r "$R" '{grant_type:"urn:ietf:params:oauth:grant-type:token-exchange",subject_token_type:"urn:ietf:params:oauth:token-type:id_token",subject_token:$s,resource:$r}')
+            code=$(curl -sS -o /tmp/ex.json -w '%{http_code}' -X POST https://huggingface.co/oauth/token -H 'Content-Type: application/json' --data "$payload")
+            if [ "$code" = "200" ]; then
+              summ=$(jq -c '{token_type,expires_in,issued_token_type,tlen:(.access_token|length)}' /tmp/ex.json 2>/dev/null || echo ok)
+            else
+              summ=$(tr '\n' ' ' < /tmp/ex.json | cut -c1-300)
+            fi
+            echo "I87_RESULT[$i]=$R|$code|$summ"
+            i=$((i+1))
+          done

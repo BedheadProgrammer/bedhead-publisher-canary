@@ -1,0 +1,12 @@
+name: Selected Protected Workflow
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  selected:
+    environment: protected-selected
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo selected-protected-workflow

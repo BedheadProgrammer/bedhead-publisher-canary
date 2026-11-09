@@ -43,8 +43,9 @@ jobs:
           probe "/api/whoami-v2"
           probe "/api/models/$RESOURCE"
           probe "/api/models/$RESOURCE/tree/main"
-          probe "/api/models/$RESOURCE/resolve/main/HF60_TP_CANARY.txt"
-          probe "/api/models/$RESOURCE/settings"
+          probe "/$RESOURCE/resolve/main/HF60_TP_CANARY.txt"
+          probe "/$RESOURCE/raw/main/HF60_TP_CANARY.txt"
+          probe "/$RESOURCE/resolve/main/.gitattributes"
           probe "/api/models/$RESOURCE/settings/trusted-publishers"
-          anon=$(curl -sS -o /dev/null -w '%{http_code}' "https://huggingface.co/api/models/$RESOURCE/resolve/main/HF60_TP_CANARY.txt")
+          anon=$(curl -sS -o /dev/null -w '%{http_code}' "https://huggingface.co/$RESOURCE/resolve/main/HF60_TP_CANARY.txt")
           echo "HF60R_ANON_RESOLVE_STATUS=$anon"

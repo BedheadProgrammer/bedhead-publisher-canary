@@ -1,0 +1,49 @@
+name: i828 mint
+on:
+  workflow_dispatch:
+    inputs:
+      resource:
+        description: HF resource (namespace/name)
+        required: true
+        type: string
+      marker:
+        description: canary marker
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  mint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: exchange and commit
+        env:
+          RESOURCE: ${{ inputs.resource }}
+          MARKER: ${{ inputs.marker }}
+        run: |
+          set -uo pipefail
+          resp="$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https%3A%2F%2Fhuggingface.co")"
+          TOK="$(jq -er .value <<<"$resp")"
+          echo "::add-mask::$TOK"
+          python3 - "$TOK" <<'PY'
+          import base64,json,sys
+          tok=sys.argv[1]; q=tok.split('.')[1]; q+='='*(-len(q)%4)
+          c=json.loads(base64.urlsafe_b64decode(q))
+          print("I828_CLAIMS="+json.dumps({k:c.get(k) for k in ["iss","aud","repository","ref","workflow","workflow_ref","sub"]},sort_keys=True))
+          PY
+          payload=$(jq -cn --arg s "$TOK" --arg r "$RESOURCE" '{grant_type:"urn:ietf:params:oauth:grant-type:token-exchange",subject_token_type:"urn:ietf:params:oauth:token-type:id_token",subject_token:$s,resource:$r}')
+          code=$(curl -sS -o /tmp/ex.json -w '%{http_code}' -X POST https://huggingface.co/oauth/token -H 'Content-Type: application/json' --data "$payload")
+          echo "I828_EXCHANGE_STATUS=$code"
+          head -c 500 /tmp/ex.json; echo
+          if [ "$code" != "200" ]; then exit 1; fi
+          HFT="$(jq -er .access_token /tmp/ex.json)"
+          echo "::add-mask::$HFT"
+          jq -c '{token_type,expires_in,issued_token_type}' /tmp/ex.json | sed 's/^/I828_TOKEN=/'
+          marker_b64="$(printf '%s\n' "$MARKER" | base64 -w0)"
+          header="$(jq -cn --arg s "i828 canary: $MARKER" '{key:"header",value:{summary:$s,description:"i828 TP persistence canary"}}')"
+          file="$(jq -cn --arg c "$marker_b64" '{key:"file",value:{content:$c,path:"I828_TP_CANARY.txt",encoding:"base64"}}')"
+          printf '%s\n%s\n' "$header" "$file" > /tmp/commit.ndjson
+          ccode="$(curl -sS -o /tmp/commit.json -w '%{http_code}' -X POST "https://huggingface.co/api/models/${RESOURCE}/commit/main" -H "Authorization: Bearer $HFT" -H 'Content-Type: application/x-ndjson' --data-binary @/tmp/commit.ndjson)"
+          echo "I828_COMMIT_STATUS=$ccode"
+          head -c 800 /tmp/commit.json; echo

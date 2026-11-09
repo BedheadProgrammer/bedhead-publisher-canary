@@ -29,6 +29,7 @@ jobs:
           OTHER: ${{ inputs.other }}
           ART_DIR: artifact
         run: |
+          python3 - <<'PROBE_PY'
           # -*- coding: utf-8 -*-
           # i851: privilege ceiling of a Trusted-Publisher-minted hf_jwt_ (runs inside GitHub Actions where the OIDC id_token is minted)
           import json, os, sys, base64, hashlib, urllib.request, urllib.error
@@ -240,7 +241,7 @@ jobs:
                   log("scope:target_token_other_repo", *req("GET", "/api/models/%s/settings" % OTHER, token=tok))
 
           print("PROBE_DONE")
-
+          PROBE_PY
       - name: upload results
         if: always()
         uses: actions/upload-artifact@v4

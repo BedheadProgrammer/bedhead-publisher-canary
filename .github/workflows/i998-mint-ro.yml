@@ -1,0 +1,51 @@
+name: i998 mint ro
+on:
+  workflow_dispatch:
+    inputs:
+      resource:
+        description: HF resource (buckets/namespace/name or namespace/name)
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  mint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: exchange
+        env:
+          RESOURCE: ${{ inputs.resource }}
+        run: |
+          set -uo pipefail
+          mkdir -p artifact
+          resp="$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https%3A%2F%2Fhuggingface.co")"
+          TOK="$(jq -er .value <<<"$resp")"
+          echo "::add-mask::$TOK"
+          python3 - "$TOK" <<'PY'
+          import base64,json,sys
+          tok=sys.argv[1]
+          def dec(t):
+              p=t.split('.')[1]; p+='='*(-len(p)%4); return json.loads(base64.urlsafe_b64decode(p))
+          open('artifact/oidc_claims.json','w').write(json.dumps(dec(tok),indent=2,sort_keys=True))
+          print("OIDC_OK")
+          PY
+          payload=$(jq -cn --arg s "$TOK" --arg r "$RESOURCE" '{grant_type:"urn:ietf:params:oauth:grant-type:token-exchange",subject_token_type:"urn:ietf:params:oauth:token-type:id_token",subject_token:$s,resource:$r}')
+          code=$(curl -sS -o /tmp/ex.json -w '%{http_code}' -X POST https://huggingface.co/oauth/token -H 'Content-Type: application/json' --data "$payload")
+          echo "EXCHANGE_STATUS=$code"
+          head -c 400 /tmp/ex.json | sed 's/hf_jwt_[A-Za-z0-9_.-]*/<masked>/g'; echo
+          if [ "$code" != "200" ]; then exit 1; fi
+          jq -r .access_token /tmp/ex.json > artifact/hf_jwt.txt
+          python3 - <<'PY'
+          import base64,json
+          tok=open('artifact/hf_jwt.txt').read().strip()
+          p=tok.split('.')[1]; p+='='*(-len(p)%4)
+          open('artifact/jwt_claims.json','w').write(json.dumps(json.loads(base64.urlsafe_b64decode(p)),indent=2,sort_keys=True))
+          print("JWT_LEN",len(tok))
+          PY
+      - name: upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: i998-token-i998-mint-ro
+          path: artifact/

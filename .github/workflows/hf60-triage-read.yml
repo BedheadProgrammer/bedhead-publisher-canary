@@ -1,0 +1,50 @@
+name: hf60 triage read
+on:
+  workflow_dispatch:
+    inputs:
+      resource:
+        description: HF resource (namespace/name)
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: mint and read-only probe
+        env:
+          RESOURCE: ${{ inputs.resource }}
+        run: |
+          set -uo pipefail
+          resp="$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https%3A%2F%2Fhuggingface.co")"
+          TOK="$(jq -er .value <<<"$resp")"
+          echo "::add-mask::$TOK"
+          payload=$(jq -cn --arg s "$TOK" --arg r "$RESOURCE" '{grant_type:"urn:ietf:params:oauth:grant-type:token-exchange",subject_token_type:"urn:ietf:params:oauth:token-type:id_token",subject_token:$s,resource:$r}')
+          code=$(curl -sS -o /tmp/ex.json -w '%{http_code}' -X POST https://huggingface.co/oauth/token -H 'Content-Type: application/json' --data "$payload")
+          echo "HF60R_EXCHANGE_STATUS=$code"
+          if [ "$code" != "200" ]; then head -c 500 /tmp/ex.json; echo; exit 1; fi
+          HFT="$(jq -er .access_token /tmp/ex.json)"
+          echo "::add-mask::$HFT"
+          python3 - "$HFT" <<'PY'
+          import base64,json,sys
+          t=sys.argv[1]; q=t.split('.')[1]; q+='='*(-len(q)%4)
+          c=json.loads(base64.urlsafe_b64decode(q))
+          print("HF60R_JWT_CLAIMS="+json.dumps({k:c.get(k) for k in ["iss","read","permissions","permittedRepos"]},sort_keys=True))
+          PY
+          probe() {
+            p="$1"
+            st=$(curl -sS -o /tmp/body -w '%{http_code}' -H "Authorization: Bearer $HFT" "https://huggingface.co$p")
+            sz=$(wc -c </tmp/body)
+            sh=$(sha256sum /tmp/body | cut -c1-16)
+            echo "HF60R_GET $p status=$st bytes=$sz sha16=$sh"
+          }
+          probe "/api/whoami-v2"
+          probe "/api/models/$RESOURCE"
+          probe "/api/models/$RESOURCE/tree/main"
+          probe "/api/models/$RESOURCE/resolve/main/HF60_TP_CANARY.txt"
+          probe "/api/models/$RESOURCE/settings"
+          probe "/api/models/$RESOURCE/settings/trusted-publishers"
+          anon=$(curl -sS -o /dev/null -w '%{http_code}' "https://huggingface.co/api/models/$RESOURCE/resolve/main/HF60_TP_CANARY.txt")
+          echo "HF60R_ANON_RESOLVE_STATUS=$anon"

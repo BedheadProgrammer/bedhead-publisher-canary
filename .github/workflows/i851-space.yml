@@ -61,14 +61,20 @@ jobs:
           idtok = json.loads(urllib.request.urlopen(rq).read())["value"]
           print("OIDC_SUB=" + decode(idtok).get("sub", ""))
 
-          body = {"grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-                  "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
-                  "subject_token": idtok, "resource": SPACE}
-          st, b = req("POST", "/oauth/token", body=body)
-          print("EXCHANGE status=%s body=%s" % (st, b[:300]))
-          try:
-              tok = json.loads(b)["access_token"]
-          except Exception:
+          tok = None
+          for res in [SPACE, "spaces/" + SPACE, "space/" + SPACE, "spaces:" + SPACE]:
+              body = {"grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                      "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+                      "subject_token": idtok, "resource": res}
+              st, b = req("POST", "/oauth/token", body=body)
+              print("EXCHANGE resource=%r status=%s body=%s" % (res, st, b[:300]))
+              try:
+                  tok = json.loads(b)["access_token"]
+                  print("MINTED_RESOURCE=%r" % res)
+                  break
+              except Exception:
+                  tok = None
+          if not tok:
               print("NO_SPACE_TOKEN")
               sys.exit(1)
           cl = decode(tok)

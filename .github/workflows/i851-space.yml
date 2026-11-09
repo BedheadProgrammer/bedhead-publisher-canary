@@ -112,7 +112,7 @@ jobs:
                                        ctype="application/x-www-form-urlencoded",
                                        extra={"Origin": "https://huggingface.co"}))
           log("repo_delete", *req("POST", "/api/repos/delete", token=tok,
-                                  body={"type": "space", "name": SPACE}))
+                                  body={"type": "space", "name": rn}))
           # cross-resource check: same token against a model repo
           log("scope_other_model", *req("GET", "/api/models/h1testrightmeow/i851-leftover-moved-1794210186/settings/trusted-publishers", token=tok))
           print("SPACE_PROBE_DONE")

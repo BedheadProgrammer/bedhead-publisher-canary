@@ -29,8 +29,7 @@ jobs:
           payload=$(jq -cn --arg s "$TOK" --arg r "$RESOURCE" '{grant_type:"urn:ietf:params:oauth:grant-type:token-exchange",subject_token_type:"urn:ietf:params:oauth:token-type:id_token",subject_token:$s,resource:$r}')
           code=$(curl -sS -o /tmp/ex.json -w '%{http_code}' -X POST https://huggingface.co/oauth/token -H 'Content-Type: application/json' --data "$payload")
           echo "HF60_EXCHANGE_STATUS=$code"
-          head -c 500 /tmp/ex.json; echo
-          if [ "$code" != "200" ]; then exit 1; fi
+          if [ "$code" != "200" ]; then head -c 500 /tmp/ex.json; echo; exit 1; fi
           HFT="$(jq -er .access_token /tmp/ex.json)"
           echo "::add-mask::$HFT"
           python3 - "$HFT" <<'PY'

